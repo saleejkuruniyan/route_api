@@ -20,14 +20,12 @@ gmaps = googlemaps.Client(key=api_key)
 class OptimalFuelRouteView(APIView):
     def post(self, request):
         try:
-            # Parse start and end locations
             start_location = ast.literal_eval(request.data["start_location"])  # Example: "(34.052235, -118.243683)"
             finish_location = ast.literal_eval(request.data["finish_location"])  # Example: "(36.778259, -119.417931)"
-
-            truck_range = 500  # miles
-            fuel_efficiency = 10  # mpg
-            buffer_range = 25  # miles
-            deviation_limit = 3  # miles
+            truck_range = request.data.get("truck_range", 500)  # Optional truck range in miles
+            fuel_efficiency = request.data.get("fuel_efficiency", 10)  # Optional fuel efficiency in mpg
+            buffer_range = request.data.get("buffer_range", 50)  # Optional buffer range in miles
+            deviation_limit = request.data.get("deviation_limit", 2)  # Optional deviation limit in miles
 
             if not start_location or not finish_location:
                 return Response(
@@ -35,7 +33,7 @@ class OptimalFuelRouteView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            # Step 1: Get polyline from Google Directions API
+            # Get polyline from Google Directions API
             logger.info("Fetching directions from Google Maps API...")
             directions = gmaps.directions(start_location, finish_location, mode="driving")
 
@@ -73,11 +71,11 @@ class OptimalFuelRouteView(APIView):
                     "total_cost": total_cost
                 })
 
-            # Step 2: Find stations near the route
+            # Find stations near the route
             station_coords = np.array([(station.latitude, station.longitude) for station in all_stations])
             station_tree = cKDTree(station_coords)
 
-            # Step 2: Query stations near each path point
+            # Query stations near each path point
             nearby_stations = {}
             path_coords = np.array([(point["lat"], point["lng"]) for point in decoded_path])
 
@@ -90,7 +88,7 @@ class OptimalFuelRouteView(APIView):
                 for idx in indices:
                     station = all_stations[idx]
                     station_id = station.stop_id
-                    if station_id not in nearby_stations:  # Avoid duplicates
+                    if station_id not in nearby_stations:
                         nearby_stations[station_id] = {
                             "id": station.stop_id,
                             "name": station.name,
@@ -103,7 +101,6 @@ class OptimalFuelRouteView(APIView):
                             "price_per_gallon": station.price_per_gallon,
                         }
 
-            # Convert the result to a list
             nearby_stations_list = list(nearby_stations.values())
             logger.info(f"Filtered to {len(nearby_stations_list)} stations within {deviation_limit} miles of the route.")
 
@@ -114,10 +111,9 @@ class OptimalFuelRouteView(APIView):
                 ).miles
             )
 
-            # Step 3: Select optimal stations for refueling
-            # Initialize variables
+            # Select optimal stations for refueling
             optimal_stations = []
-            current_position = last_position = start_location
+            current_position = start_location
             remaining_distance = total_distance
 
             while remaining_distance > (truck_range - buffer_range):
@@ -146,6 +142,10 @@ class OptimalFuelRouteView(APIView):
                 # If no candidate points are found, reduce buffer range and retry
                 if not candidate_points:
                     logger.info("No valid points found within range. Expanding buffer range.")
+                    # Check if buffer_range exceeds truck_range
+                    if buffer_range + 25 > truck_range:
+                        return Response({"error": "No points found with in the maximum distance truck can travel."}, status=status.HTTP_404_NOT_FOUND)
+
                     buffer_range += 25
                     continue
 
@@ -156,31 +156,37 @@ class OptimalFuelRouteView(APIView):
                     if any(geodesic(station_coords, point).miles <= buffer_range for point in candidate_points):
                         stations_in_buffer.append(station)
 
+                logger.info(f"Length of nearby_stations_list: {len(stations_in_buffer)}")
+
                 # If no stations found, reduce buffer range and retry
                 if not stations_in_buffer:
                     logger.info("No stations available within buffer range. Expanding buffer range.")
+                    # Check if buffer_range exceeds truck_range
+                    if buffer_range + 25 > truck_range:
+                        return Response({"error": "No fuel stations found with in the maximum distance truck can travel."}, status=status.HTTP_404_NOT_FOUND)
+
                     buffer_range += 25
                     continue
                 logger.info(f"Found {len(stations_in_buffer)} stations within buffer range.")
 
                 # Find the cheapest station
                 cheapest_station = min(stations_in_buffer, key=lambda s: s["price_per_gallon"])
+                logger.info(f"Selected Station: {cheapest_station}")
 
                 # Add the station to the optimal stations list
                 optimal_stations.append(cheapest_station)
 
                 # Update the current position and remaining distance
                 current_position = (cheapest_station["latitude"], cheapest_station["longitude"])
-                remaining_distance -= geodesic(last_position, current_position).miles
+                remaining_distance = geodesic(current_position, finish_location).miles
 
-                # Remove stations before the selected station
-                nearby_stations_list = [
-                    station for station in nearby_stations_list
-                    if geodesic(current_position, (station["latitude"], station["longitude"])).miles > 0
-                ]
+                logger.info(f"Remaining Distance: {remaining_distance}")
 
-                # Update start location for the next iteration
-                last_position = current_position
+                # Locate the index of the selected station in nearby_stations_list and remove all stations before the selected station
+                cheapest_station_index = nearby_stations_list.index(cheapest_station)
+                nearby_stations_list = nearby_stations_list[cheapest_station_index + 1:]
+
+                logger.info(f"Length of remaining nearby_stations_list: {len(nearby_stations_list)}")
 
             logger.info(f"No. of Optimal Stations: {len(optimal_stations)}")
 
@@ -193,38 +199,49 @@ class OptimalFuelRouteView(APIView):
                             f"{finish_location[0]},{finish_location[1]}"
                         ]
 
+            logger.info(f"Locations: {locations}")
+
             url = "https://maps.googleapis.com/maps/api/distancematrix/json"
 
-            # Make a single API call
+            # Make a single Distance Matrix API call
             response = requests.get(url, params={
                 "origins": "|".join(locations[:-1]),
                 "destinations": "|".join(locations[1:]),
                 "key": api_key
             }).json()
 
-            # Extract distances in miles
-            distances = [
-                element['distance']['value'] / 1609.34  # Convert meters to miles
-                for row in response['rows']
-                for element in row['elements']
-            ]
+            # Extract distances in miles between adjacent locations
+            distances = []
+            for i in range(len(locations) - 1):
+                element = response["rows"][i]["elements"][i]
+                if element["status"] == "OK":
+                    distances.append(element["distance"]["value"] / 1609.34)  # Convert meters to miles
+                else:
+                    distances.append(0)
 
             # Calculate fuel costs
-            if optimal_stations:
-                average_price = sum([station['price_per_gallon'] for station in optimal_stations]) / len(optimal_stations)
-            else:
-                average_price = sum([station.price_per_gallon for station in all_stations]) / len(all_stations)
-            logger.info(f"Average price per gallon (USD): {round(average_price, 2)}")
-            fuel_costs = [
-                (distances[i] / fuel_efficiency) * optimal_stations[i]['price_per_gallon']
-                for i in range(len(optimal_stations))
-            ]
-            # Add cost for the last leg
-            fuel_costs.append((distances[-1] / fuel_efficiency) * average_price)
-            total_cost = round(sum(fuel_costs), 2)
+            fuel_costs = []
 
-            logger.info(f"Fuel Costs per leg (USD): {fuel_costs}")
-            logger.info(f"Total Cost (USD): {total_cost}")
+            for i, distance in enumerate(distances):
+                if i < len(optimal_stations):
+                    price_per_gallon = optimal_stations[i]["price_per_gallon"]
+                    logger.info(f"Price per gallon for this leg: {price_per_gallon}")
+                else:
+                    if optimal_stations:
+                        price_per_gallon = sum([station['price_per_gallon'] for station in optimal_stations]) / len(optimal_stations)
+                    else:
+                        price_per_gallon = sum([station.price_per_gallon for station in all_stations]) / len(all_stations)
+                    logger.info(f"Price per gallon for final leg: {price_per_gallon}")
+
+                fuel_cost = (distance / fuel_efficiency) * price_per_gallon
+                fuel_costs.append(fuel_cost)
+
+            total_fuel_cost = sum(fuel_costs)
+
+            # Output results
+            logger.info(f"Distances (miles): {distances}")
+            logger.info(f"Fuel Costs (USD): {fuel_costs}")
+            logger.info(f"Total Fuel Cost (USD): {total_fuel_cost}")
 
             # Construct Google Maps URL with waypoints
             origin = locations[0]
@@ -236,7 +253,7 @@ class OptimalFuelRouteView(APIView):
             response_data = {
                 "route_map_url": route_map_url,
                 "optimal_route": optimal_stations,
-                "total_cost": round(total_cost, 2),
+                "total_cost": round(total_fuel_cost, 2),
             }
             return Response(response_data, status=status.HTTP_200_OK)
 
