@@ -51,6 +51,9 @@ class OptimalFuelRouteView(APIView):
 
             all_stations = FuelStation.objects.all()
 
+            if not all_stations.exists():  # Check if QuerySet is empty
+                return Response({'error': 'No fuel stations available'}, status=status.HTTP_400_BAD_REQUEST)
+
             # Check if the total distance is within the truck's range
             if total_distance <= truck_range:
                 # Calculate the fuel cost using the average price of all stations
