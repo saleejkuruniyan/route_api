@@ -64,10 +64,10 @@ class Command(BaseCommand):
                     # Update price_per_gallon if the record exists
                     station.price_per_gallon = price_per_gallon
                     station.save()
-                    self.stdout.write(self.style.SUCCESS(f"Updated price for: {station.name} (Stop ID: {stop_id})"))
+                    self.stdout.write(self.style.SUCCESS(f"Updated price for: {station.name}, {station.city}, {station.state} (Stop ID: {stop_id})"))
                 else:
                     # Add to the list for geocoding
-                    address = f"{row['Truckstop Name']}, {row['City']}, {row['State']}, USA"
+                    address = f"{row['Truckstop Name'].strip()}, {row['Address'].strip()}, {row['City'].strip()}, {row['State'].strip()}, USA"
                     addresses_to_geocode.append((row, address))
 
         # Use ThreadPoolExecutor for concurrent geocoding requests
@@ -85,7 +85,7 @@ class Command(BaseCommand):
                     latitude, longitude = future.result()
                     results.append((row, latitude, longitude))
                 except Exception as e:
-                    print(f"Error processing address: {row['Truckstop Name']}, Error: {e}")
+                    print(f"Error processing address: {row['Truckstop Name'].strip()}, {row['City'].strip()}, {row['State'].strip()}, Error: {e}")
 
         # Save new entries to the database
         for row, latitude, longitude in results:
@@ -101,8 +101,8 @@ class Command(BaseCommand):
                     longitude=longitude,
                     price_per_gallon=float(row['Retail Price'])
                 )
-                self.stdout.write(self.style.SUCCESS(f"Added: {row['Truckstop Name']} at {latitude}, {longitude}"))
+                self.stdout.write(self.style.SUCCESS(f"Added: {row['Truckstop Name'].strip()}, {row['City'].strip()}, {row['State'].strip()} at {latitude}, {longitude}"))
             else:
-                self.stdout.write(self.style.WARNING(f"Skipping: {row['Truckstop Name']}, coordinates not found."))
+                self.stdout.write(self.style.WARNING(f"Skipping: {row['Truckstop Name'].strip()}, {row['City'].strip()}, {row['State'].strip()} , coordinates not found."))
 
         self.stdout.write(self.style.SUCCESS("Geocoding and updates completed successfully."))
