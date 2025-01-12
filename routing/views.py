@@ -114,59 +114,21 @@ class OptimalFuelRouteView(APIView):
             # Select optimal stations for refueling
             optimal_stations = []
             current_position = start_location
-            remaining_distance = total_distance
 
-            while remaining_distance > (truck_range - buffer_range):
-                # Find all path points within the current buffer range
-                candidate_points = []
-                traveled_distance = 0
-                last_point = current_position
+            while True:
+                # Filter stations directly within the buffer range
+                stations_in_buffer = [
+                    station for station in nearby_stations_list
+                    if (truck_range - buffer_range) <= geodesic(current_position, (station["latitude"], station["longitude"])).miles <= (truck_range - 25)]
 
-                for path_point in decoded_path:
-                    path_coords = (path_point["lat"], path_point["lng"])
-                    # Calculate the incremental distance between consecutive points
-                    distance_to_point = geodesic(last_point, path_coords).miles
-                    traveled_distance += distance_to_point
-
-                    # Check if this point is within the valid range
-                    if (truck_range - buffer_range) <= traveled_distance <= (truck_range - 25):
-                        candidate_points.append(path_coords)
-
-                    # Stop if we've exceeded the truck's range
-                    if traveled_distance > truck_range:
-                        break
-
-                    # Update last_point to the current path_coords
-                    last_point = path_coords
-
-                # If no candidate points are found, reduce buffer range and retry
-                if not candidate_points:
-                    logger.info("No valid points found within range. Expanding buffer range.")
-                    # Check if buffer_range exceeds truck_range
-                    if buffer_range + 25 > truck_range:
-                        return Response({"error": "No points found with in the maximum distance truck can travel."}, status=status.HTTP_404_NOT_FOUND)
-
-                    buffer_range += 25
-                    continue
-
-                # Filter stations within buffer range of candidate points
-                stations_in_buffer = []
-                for station in nearby_stations_list:
-                    station_coords = (station["latitude"], station["longitude"])
-                    if any(geodesic(station_coords, point).miles <= buffer_range for point in candidate_points):
-                        stations_in_buffer.append(station)
-
-                logger.info(f"Length of nearby_stations_list: {len(stations_in_buffer)}")
-
-                # If no stations found, reduce buffer range and retry
+                # If no stations are found, adjust buffer range and retry
                 if not stations_in_buffer:
                     logger.info("No stations available within buffer range. Expanding buffer range.")
-                    # Check if buffer_range exceeds truck_range
                     if buffer_range + 25 > truck_range:
-                        return Response({"error": "No fuel stations found with in the maximum distance truck can travel."}, status=status.HTTP_404_NOT_FOUND)
-
+                        return Response({"error": "No fuel stations found within the maximum distance truck can travel."}, status=status.HTTP_404_NOT_FOUND)
                     buffer_range += 25
                     continue
+
                 logger.info(f"Found {len(stations_in_buffer)} stations within buffer range.")
 
                 # Find the cheapest station
@@ -182,7 +144,12 @@ class OptimalFuelRouteView(APIView):
 
                 logger.info(f"Remaining Distance: {remaining_distance}")
 
-                # Locate the index of the selected station in nearby_stations_list and remove all stations before the selected station
+                # Check if the destination is within range
+                if remaining_distance <= truck_range:
+                    logger.info("Destination is within range. Stopping further calculations.")
+                    break
+
+                # Remove visited stations from the list
                 cheapest_station_index = nearby_stations_list.index(cheapest_station)
                 nearby_stations_list = nearby_stations_list[cheapest_station_index + 1:]
 
